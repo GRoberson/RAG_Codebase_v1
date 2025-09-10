@@ -21,7 +21,7 @@ from google import genai
 from google.cloud import storage
 from google.genai.types import GenerateContentConfig, Retrieval, Tool, VertexRagStore
 import vertexai
-from vertexai import rag
+from vertexai.preview import rag
 
 
 class AssistenteRAG:
