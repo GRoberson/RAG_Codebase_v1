@@ -3,31 +3,31 @@
 # Este arquivo contém todas as dependências necessárias para executar
 # o sistema de análise de código usando Google Cloud Vertex AI RAG
 
-# Google Cloud Vertex AI - Para funcionalidades de IA e RAG
-google-cloud-vertexai>=1.38.0
+# Google Cloud AI Platform - Para funcionalidades de IA e RAG
+google-cloud-aiplatform>=1.90.0
 
 # Google GenAI - Cliente para modelos generativos
-google-genai>=0.3.0
+google-genai>=1.9.0
 
 # Google Cloud Storage - Para upload e gerenciamento de arquivos
-google-cloud-storage>=2.10.0
+google-cloud-storage>=2.19.0
 
 # Dependências adicionais que podem ser necessárias
 # (geralmente instaladas automaticamente com os pacotes acima)
 
 # Para autenticação e configuração do Google Cloud
-google-auth>=2.23.0
+google-auth>=2.38.0
 google-auth-oauthlib>=1.0.0
 google-auth-httplib2>=0.1.0
 
 # Para operações de I/O e processamento de arquivos
-google-cloud-core>=2.3.0
+google-cloud-core>=2.4.0
 
 # Para suporte a tipos e anotações
-typing-extensions>=4.5.0
+typing-extensions>=4.13.0
 
 # Para operações de data e tempo (se necessário)
-google-api-core>=2.11.0
+google-api-core>=2.24.0
 
 # Notas de instalação:
 # 1. Certifique-se de ter configurado as credenciais do Google Cloud
