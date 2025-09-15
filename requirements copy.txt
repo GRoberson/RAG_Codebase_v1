@@ -1,30 +1,16 @@
 # Dependências para o Assistente RAG de Código Local
 # 
 # Este arquivo contém todas as dependências necessárias para executar
-# o sistema de análise de código usando Vertex AI LLM + LangChain + Chroma
+# o sistema de análise de código usando Google Cloud Vertex AI RAG
 
-# Google Cloud AI Platform - Para modelos de IA (apenas LLM)
+# Google Cloud AI Platform - Para funcionalidades de IA e RAG
 google-cloud-aiplatform>=1.90.0
 
 # Google GenAI - Cliente para modelos generativos
 google-genai>=1.9.0
 
-# LangChain - Framework para RAG e processamento de documentos
-langchain>=0.1.0
-langchain-community>=0.0.10
-langchain-google-vertexai>=1.0.0
-
-# Chroma - Vector database local
-chromadb>=0.4.0
-
-# Para processamento de documentos e texto
-pypdf>=4.0.0
-python-docx>=1.1.0
-beautifulsoup4>=4.12.0
-lxml>=5.0.0
-
-# Para operações de I/O e processamento de arquivos
-pathlib2>=2.3.7
+# Google Cloud Storage - Para upload e gerenciamento de arquivos
+google-cloud-storage>=2.19.0
 
 # Dependências adicionais que podem ser necessárias
 # (geralmente instaladas automaticamente com os pacotes acima)
@@ -51,9 +37,3 @@ google-api-core>=2.24.0
 #    python -m venv venv
 #    source venv/bin/activate  # Linux/Mac
 #    .\venv\Scripts\activate   # Windows
-# 
-# Nova arquitetura:
-# - Vertex AI: Apenas para modelos LLM (Gemini)
-# - LangChain: Para orquestração RAG
-# - Chroma: Para vector database local
-# - Sem Google Cloud Storage: Arquivos processados localmente

@@ -16,21 +16,12 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-# Bibliotecas do Google Cloud - apenas para LLM
+# Bibliotecas do Google Cloud - não se preocupe, é mais simples do que parece!
 from google import genai
-from google.genai.types import GenerateContentConfig
+from google.cloud import storage
+from google.genai.types import GenerateContentConfig, Retrieval, Tool, VertexRagStore
 import vertexai
-
-# LangChain - para RAG e processamento de documentos
-from langchain_community.vectorstores import Chroma
-from langchain_google_vertexai import VertexAIEmbeddings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import DirectoryLoader, TextLoader
-from langchain_core.documents import Document
-
-# Para processamento de arquivos
-import tempfile
-import shutil
+from vertexai.preview import rag
 
 
 class AssistenteRAG:
@@ -51,12 +42,11 @@ class AssistenteRAG:
         """
         self.config = config
         self._verificar_configuracoes()
-        self._conectar_vertex_ai()
+        self._conectar_google_cloud()
         
         # Variáveis que vamos usar depois
-        self.vectorstore = None
-        self.retriever = None
-        self.embeddings = None
+        self.corpus_rag = None
+        self.ferramenta_busca = None
         
     def _verificar_configuracoes(self) -> None:
         """
@@ -68,7 +58,7 @@ class AssistenteRAG:
         
         # Essas são obrigatórias - sem elas não rola!
         campos_obrigatorios = [
-            'PROJECT_ID', 'LOCATION', 'CAMINHO_CODIGO',
+            'PROJECT_ID', 'LOCATION', 'BUCKET_NAME', 'CAMINHO_CODIGO',
             'MODELO_EMBEDDING', 'MODELO_IA'
         ]
         
@@ -80,17 +70,20 @@ class AssistenteRAG:
         if self.config['PROJECT_ID'] == "seu-projeto-aqui":
             raise ValueError("🚨 Você precisa colocar o ID real do seu projeto Google Cloud!")
             
+        if self.config['BUCKET_NAME'] == "seu-bucket-aqui":
+            raise ValueError("🚨 Você precisa colocar o nome real do seu bucket!")
+            
         if not os.path.exists(self.config['CAMINHO_CODIGO']):
             raise ValueError(f"🚨 Não encontrei o diretório: {self.config['CAMINHO_CODIGO']}")
             
         print("✅ Tudo certo! Suas configurações estão perfeitas.")
     
-    def _conectar_vertex_ai(self) -> None:
+    def _conectar_google_cloud(self) -> None:
         """
-        Conectando com o Vertex AI... É como fazer login, mas para robôs! 🤖
+        Conectando com o Google Cloud... É como fazer login, mas para robôs! 🤖
         """
         try:
-            print("🔗 Conectando com o Vertex AI...")
+            print("🔗 Conectando com o Google Cloud...")
             
             # Inicializar o Vertex AI
             vertexai.init(
@@ -98,71 +91,49 @@ class AssistenteRAG:
                 location=self.config['LOCATION']
             )
             
-            # Criar cliente para modelos de IA (apenas LLM)
+            # Criar nossos clientes (são como "telefones" para falar com a Google)
             self.cliente_ia = genai.Client(
                 vertexai=True, 
                 project=self.config['PROJECT_ID'], 
                 location=self.config['LOCATION']
             )
             
-            # Inicializar embeddings do Vertex AI
-            self.embeddings = VertexAIEmbeddings(
-                model_name=self.config['MODELO_EMBEDDING'],
-                project=self.config['PROJECT_ID'],
-                location=self.config['LOCATION']
-            )
+            self.cliente_storage = storage.Client(project=self.config['PROJECT_ID'])
             
-            print("✅ Conectado! Agora posso conversar com a IA.")
+            print("✅ Conectado! Agora posso conversar com a Google.")
             
         except Exception as e:
             raise RuntimeError(f"😵 Deu ruim na conexão: {e}")
     
-    def verificar_diretorio(self) -> bool:
+    def verificar_bucket(self) -> bool:
         """
-        Vamos verificar se conseguimos acessar o diretório do código.
+        Vamos ver se conseguimos acessar seu bucket no Google Cloud.
         
         É como verificar se você tem a chave da sua casa! 🔑
         """
         try:
-            print(f"🔍 Verificando acesso ao diretório '{self.config['CAMINHO_CODIGO']}'...")
-            caminho = Path(self.config['CAMINHO_CODIGO'])
-            
-            if not caminho.exists():
-                print(f"❌ Diretório não existe: {caminho}")
-                return False
-            
-            if not caminho.is_dir():
-                print(f"❌ Caminho não é um diretório: {caminho}")
-                return False
-                
-            # Contar arquivos suportados
-            arquivos_encontrados = 0
-            for arquivo in caminho.rglob('*'):
-                if arquivo.is_file() and self._arquivo_suportado(arquivo):
-                    arquivos_encontrados += 1
-            
-            print(f"✅ Perfeito! Encontrei {arquivos_encontrados} arquivos para processar.")
-            return arquivos_encontrados > 0
-            
+            print(f"🔍 Verificando acesso ao bucket '{self.config['BUCKET_NAME']}'...")
+            bucket = self.cliente_storage.get_bucket(self.config['BUCKET_NAME'])
+            print(f"✅ Perfeito! Consegui acessar o bucket: {bucket.name}")
+            return True
         except Exception as e:
-            print(f"❌ Ops! Não consegui acessar o diretório: {e}")
-            print("💡 Dica: Verifique se o caminho está correto e se você tem permissão!")
+            print(f"❌ Ops! Não consegui acessar o bucket: {e}")
+            print("💡 Dica: Verifique se o bucket existe e se você tem permissão!")
             return False
     
-    def processar_arquivos_localmente(self) -> tuple[int, int]:
+    def enviar_arquivos(self) -> tuple[int, int]:
         """
-        Hora de processar seus arquivos localmente! 💻
+        Hora de enviar seus arquivos para a nuvem! ☁️
         
-        Agora processamos tudo na sua máquina, sem enviar para a nuvem.
+        É como fazer backup, mas mais inteligente.
         
         Returns:
-            Uma tupla com (arquivos processados, arquivos ignorados)
+            Uma tupla com (arquivos enviados, arquivos ignorados)
         """
-        print("📁 Preparando para processar seus arquivos localmente...")
+        print("📤 Preparando para enviar seus arquivos...")
         
-        processados = 0
+        enviados = 0
         ignorados = 0
-        documentos = []
         
         # Calcular limite de tamanho
         limite_bytes = 0
@@ -170,7 +141,10 @@ class AssistenteRAG:
             limite_bytes = self.config['TAMANHO_MAX_MB'] * 1024 * 1024
             print(f"📏 Limite de tamanho: {self.config['TAMANHO_MAX_MB']} MB")
         
+        # Pegar o bucket
+        bucket = self.cliente_storage.get_bucket(self.config['BUCKET_NAME'])
         caminho_local = Path(self.config['CAMINHO_CODIGO'])
+        
         print(f"🔍 Procurando arquivos em: {caminho_local}")
         
         # Vamos passear pelos arquivos!
@@ -185,54 +159,41 @@ class AssistenteRAG:
                             ignorados += 1
                             continue
                     
-                    # Ler o conteúdo do arquivo
-                    try:
-                        with open(arquivo, 'r', encoding='utf-8') as f:
-                            conteudo = f.read()
-                    except UnicodeDecodeError:
-                        try:
-                            with open(arquivo, 'r', encoding='latin-1') as f:
-                                conteudo = f.read()
-                        except Exception:
-                            print(f"⏭️  Não consegui ler: {arquivo.name}")
-                            ignorados += 1
-                            continue
-                    
-                    # Criar documento LangChain
+                    # Criar caminho no bucket mantendo a estrutura
                     caminho_relativo = arquivo.relative_to(caminho_local)
-                    documento = Document(
-                        page_content=conteudo,
-                        metadata={
-                            "source": str(caminho_relativo),
-                            "file_path": str(arquivo),
-                            "file_type": arquivo.suffix.lower(),
-                            "file_size": arquivo.stat().st_size
-                        }
-                    )
-                    documentos.append(documento)
-                    processados += 1
+                    
+                    pasta_gcs = self.config.get('PASTA_GCS', '').strip('/')
+                    if pasta_gcs:
+                        nome_no_bucket = f"{pasta_gcs}/{caminho_relativo}"
+                    else:
+                        nome_no_bucket = str(caminho_relativo)
+                    
+                    # Normalizar para o formato do GCS
+                    nome_no_bucket = nome_no_bucket.replace("\\", "/")
+                    
+                    # Enviar o arquivo
+                    blob = bucket.blob(nome_no_bucket)
+                    blob.upload_from_filename(str(arquivo))
+                    enviados += 1
                     
                     # Mostrar progresso de vez em quando
-                    if processados % 25 == 0:
-                        print(f"📁 Já processei {processados} arquivos...")
+                    if enviados % 25 == 0:
+                        print(f"📤 Já enviei {enviados} arquivos...")
                         
                 except Exception as e:
-                    print(f"❌ Erro ao processar {arquivo.name}: {e}")
+                    print(f"❌ Erro ao enviar {arquivo.name}: {e}")
                     ignorados += 1
         
-        # Armazenar documentos para uso posterior
-        self.documentos = documentos
-        
         # Relatório final
-        print(f"\n🎉 Pronto! Processei {processados} arquivos localmente")
+        print(f"\n🎉 Pronto! Enviei {enviados} arquivos")
         if ignorados > 0:
             print(f"⏭️  Ignorei {ignorados} arquivos (muito grandes ou com erro)")
         
-        if processados == 0:
-            print("\n🤔 Hmm, não encontrei nenhum arquivo para processar...")
+        if enviados == 0:
+            print("\n🤔 Hmm, não encontrei nenhum arquivo para enviar...")
             print("💡 Verifique se o caminho está certo e se há arquivos suportados!")
         
-        return processados, ignorados
+        return enviados, ignorados
     
     def _arquivo_suportado(self, arquivo: Path) -> bool:
         """
@@ -255,78 +216,97 @@ class AssistenteRAG:
         
         return False
     
-    def criar_vectorstore(self) -> None:
+    def criar_corpus_rag(self) -> None:
         """
         Agora vamos criar o "cérebro" que vai entender seu código! 🧠
         
-        É aqui que a mágica acontece - transformamos código em conhecimento usando Chroma.
+        É aqui que a mágica acontece - transformamos código em conhecimento.
         """
         try:
-            print("🧠 Criando o cérebro da IA com Chroma...")
+            print("🧠 Criando o cérebro da IA...")
             
-            if not hasattr(self, 'documentos') or not self.documentos:
-                raise RuntimeError("Nenhum documento foi processado ainda! Execute processar_arquivos_localmente() primeiro.")
+            # Gerar um nome único
+            id_unico = uuid.uuid4()
+            nome_corpus = f"corpus-codigo-{id_unico}"
             
-            # Dividir documentos em chunks
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=self.config.get('TAMANHO_PEDACO', 1024),
-                chunk_overlap=self.config.get('SOBREPOSICAO_PEDACO', 256),
-                separators=["\n\n", "\n", " ", ""]
+            self.corpus_rag = rag.create_corpus(
+                display_name=nome_corpus,
+                description=f"Conhecimento extraído do código em {self.config['CAMINHO_CODIGO']}",
+                backend_config=rag.RagVectorDbConfig(
+                    rag_embedding_model_config=rag.RagEmbeddingModelConfig(
+                        vertex_prediction_endpoint=rag.VertexPredictionEndpoint(
+                            publisher_model=self.config['MODELO_EMBEDDING']
+                        )
+                    )
+                )
             )
             
-            print("✂️ Dividindo documentos em pedaços menores...")
-            texts = text_splitter.split_documents(self.documentos)
-            print(f"📄 Criei {len(texts)} pedaços de texto")
-            
-            # Criar diretório para o banco vetorial
-            db_path = "./chroma_db"
-            if os.path.exists(db_path):
-                shutil.rmtree(db_path)
-            
-            print("🗄️ Criando banco vetorial local...")
-            
-            # Criar vector store com Chroma
-            self.vectorstore = Chroma.from_documents(
-                documents=texts,
-                embedding=self.embeddings,
-                persist_directory=db_path
-            )
-            
-            # Persistir o banco de dados
-            self.vectorstore.persist()
-            
-            print(f"✅ Cérebro criado com sucesso! Banco salvo em: {db_path}")
+            print(f"✅ Cérebro criado: {self.corpus_rag.display_name}")
             
         except Exception as e:
             raise RuntimeError(f"😵 Erro ao criar o cérebro: {e}")
     
-    def criar_retriever(self) -> None:
+    def processar_arquivos(self) -> None:
         """
-        Hora de criar o sistema de busca inteligente! 🔍
+        Hora de ensinar a IA sobre seu código! 📚
         
-        É como dar uma lupa super poderosa para a IA encontrar informações.
+        É como dar aulas particulares para a IA sobre seu projeto.
         """
         try:
-            print("🔍 Criando sistema de busca inteligente...")
+            print("📚 Ensinando a IA sobre seu código...")
             
-            if not self.vectorstore:
-                raise RuntimeError("Vector store não foi criado ainda! Execute criar_vectorstore() primeiro.")
+            # Montar o caminho dos arquivos no GCS
+            pasta_gcs = self.config.get('PASTA_GCS', '').strip('/')
+            bucket_uri = f"gs://{self.config['BUCKET_NAME']}"
             
-            # Criar retriever
-            self.retriever = self.vectorstore.as_retriever(
-                search_type="similarity",
-                search_kwargs={
-                    "k": self.config.get('TOP_RESULTADOS', 10),
-                    "score_threshold": self.config.get('LIMITE_SIMILARIDADE', 0.5)
-                }
+            if pasta_gcs:
+                caminho_importacao = f"{bucket_uri}/{pasta_gcs}/"
+            else:
+                caminho_importacao = f"{bucket_uri}/"
+            
+            print(f"📂 Lendo arquivos de: {caminho_importacao}")
+            
+            # Começar o processo de aprendizado
+            resposta_importacao = rag.import_files(
+                corpus_name=self.corpus_rag.name,
+                paths=[caminho_importacao],
+                transformation_config=rag.TransformationConfig(
+                    chunking_config=rag.ChunkingConfig(
+                        chunk_size=self.config.get('TAMANHO_PEDACO', 1024),
+                        chunk_overlap=self.config.get('SOBREPOSICAO_PEDACO', 256)
+                    )
+                ),
             )
             
-            print("✅ Sistema de busca criado com sucesso!")
-            print("🎯 Agora posso encontrar informações relevantes no seu código!")
+            print("✅ Processo de aprendizado iniciado!")
+            print("⏳ Isso pode demorar alguns minutos... A IA está estudando seu código!")
             
         except Exception as e:
-            raise RuntimeError(f"😵 Erro ao criar sistema de busca: {e}")
+            raise RuntimeError(f"😵 Erro no processo de aprendizado: {e}")
     
+    def criar_ferramenta_busca(self) -> None:
+        """
+        Criando a ferramenta que permite à IA buscar informações no seu código! 🔧
+        
+        É como dar uma lupa super poderosa para a IA.
+        """
+        try:
+            print("🔧 Criando ferramenta de busca inteligente...")
+            
+            self.ferramenta_busca = Tool(
+                retrieval=Retrieval(
+                    vertex_rag_store=VertexRagStore(
+                        rag_corpora=[self.corpus_rag.name],
+                        similarity_top_k=self.config.get('TOP_RESULTADOS', 10),
+                        vector_distance_threshold=self.config.get('LIMITE_SIMILARIDADE', 0.5),
+                    )
+                )
+            )
+            
+            print("✅ Ferramenta de busca pronta!")
+            
+        except Exception as e:
+            raise RuntimeError(f"😵 Erro ao criar ferramenta de busca: {e}")
     
     def perguntar(self, pergunta: str) -> str:
         """
@@ -342,48 +322,15 @@ class AssistenteRAG:
             A resposta da IA
         """
         try:
-            if not self.retriever:
-                raise RuntimeError("Ops! O sistema de busca não foi criado ainda. Execute criar_retriever() primeiro!")
+            if not self.ferramenta_busca:
+                raise RuntimeError("Ops! A ferramenta de busca não foi criada ainda. Execute criar_ferramenta_busca() primeiro!")
             
             print(f"🤔 Pensando na sua pergunta: '{pergunta}'")
             
-            # Buscar documentos relevantes
-            print("🔍 Buscando informações relevantes no código...")
-            docs_relevantes = self.retriever.get_relevant_documents(pergunta)
-            
-            if not docs_relevantes:
-                return "🤷 Desculpe, não encontrei informações relevantes no código para responder sua pergunta."
-            
-            # Preparar contexto
-            contexto_partes = []
-            for i, doc in enumerate(docs_relevantes[:5]):  # Usar apenas os 5 mais relevantes
-                fonte = doc.metadata.get('source', 'arquivo desconhecido')
-                contexto_partes.append(f"Arquivo: {fonte}\nConteúdo:\n{doc.page_content}\n")
-            
-            contexto = "\n" + "="*50 + "\n".join(contexto_partes)
-            
-            # Criar prompt com contexto
-            prompt = f"""Você é um assistente especializado em análise de código. Use APENAS as informações do contexto fornecido para responder a pergunta.
-
-CONTEXTO DO CÓDIGO:
-{contexto}
-
-PERGUNTA: {pergunta}
-
-INSTRUÇÕES:
-- Responda baseado APENAS no contexto fornecido
-- Se a informação não estiver no contexto, diga que não encontrou
-- Seja específico e cite os arquivos quando relevante
-- Use uma linguagem clara e amigável
-- Se possível, forneça exemplos do código
-
-RESPOSTA:"""
-            
-            # Usar Vertex AI LLM para gerar resposta
-            print("🧠 Gerando resposta inteligente...")
             resposta = self.cliente_ia.models.generate_content(
                 model=self.config['MODELO_IA'],
-                contents=prompt
+                contents=pergunta,
+                config=GenerateContentConfig(tools=[self.ferramenta_busca]),
             )
             
             return resposta.text
@@ -391,81 +338,39 @@ RESPOSTA:"""
         except Exception as e:
             raise RuntimeError(f"😵 Erro ao processar sua pergunta: {e}")
     
-    def gerar_info_sistema(self) -> str:
+    def gerar_link_studio(self) -> str:
         """
-        Gera informações sobre o sistema RAG local! 📊
+        Gera um link direto para testar no Vertex AI Studio! 🌐
         
-        É como ter um painel de controle para ver o que está acontecendo.
+        É como ter um playground online para brincar com a IA.
         """
-        if not self.vectorstore:
-            return "🤷 Sistema RAG ainda não foi inicializado."
+        if not self.corpus_rag:
+            raise RuntimeError("Corpus RAG não foi criado ainda!")
         
-        try:
-            # Informações básicas
-            info = f"""
-🤖 Sistema RAG Local - Status
-
-📊 Configurações:
-   • Modelo de IA: {self.config['MODELO_IA']}
-   • Modelo de Embedding: {self.config['MODELO_EMBEDDING']}
-   • Tamanho do pedaço: {self.config.get('TAMANHO_PEDACO', 1024)}
-   • Sobreposição: {self.config.get('SOBREPOSICAO_PEDACO', 256)}
-
-🗄️ Banco de Dados Vetorial:
-   • Tipo: Chroma (Local)
-   • Localização: ./chroma_db
-   • Status: Ativo ✅
-
-🔍 Sistema de Busca:
-   • Top resultados: {self.config.get('TOP_RESULTADOS', 10)}
-   • Limite similaridade: {self.config.get('LIMITE_SIMILARIDADE', 0.5)}
-   • Status: {"Ativo ✅" if self.retriever else "Inativo ❌"}
-
-💻 Processamento:
-   • Documentos carregados: {len(self.documentos) if hasattr(self, 'documentos') else 0}
-   • Caminho do código: {self.config['CAMINHO_CODIGO']}
-"""
-            return info
-            
-        except Exception as e:
-            return f"❌ Erro ao obter informações: {e}"
+        # Codificar o nome para URL
+        nome_codificado = self.corpus_rag.name.replace("/", "%2F")
+        
+        # Montar a URL
+        url_studio = (
+            f"https://console.cloud.google.com/vertex-ai/studio/multimodal"
+            f";ragCorpusName={nome_codificado}"
+            f"?project={self.config['PROJECT_ID']}"
+        )
+        
+        return url_studio
     
     def limpar_recursos(self) -> None:
         """
-        Remove os recursos criados localmente! 🗑️
+        Remove os recursos criados para não gerar custos desnecessários! 🗑️
         
-        ⚠️ Cuidado: isso vai apagar o banco vetorial local!
+        ⚠️ Cuidado: isso vai apagar permanentemente o conhecimento da IA!
         """
         try:
-            recursos_removidos = []
-            
-            # Limpar vector store
-            if self.vectorstore:
-                self.vectorstore = None
-                recursos_removidos.append("Vector store")
-            
-            # Limpar retriever
-            if self.retriever:
-                self.retriever = None
-                recursos_removidos.append("Retriever")
-            
-            # Limpar documentos da memória
-            if hasattr(self, 'documentos'):
-                self.documentos = []
-                recursos_removidos.append("Documentos da memória")
-            
-            # Remover diretório do banco vetorial
-            db_path = "./chroma_db"
-            if os.path.exists(db_path):
-                shutil.rmtree(db_path)
-                recursos_removidos.append("Banco vetorial local")
-                print(f"🗑️ Removido diretório: {db_path}")
-            
-            if recursos_removidos:
-                print("🗑️ Recursos removidos:")
-                for recurso in recursos_removidos:
-                    print(f"   ✅ {recurso}")
-                print("\n💡 Para usar novamente, execute todo o processo de setup!")
+            if self.corpus_rag:
+                print("🗑️ Removendo recursos...")
+                rag.delete_corpus(self.corpus_rag.name)
+                print(f"✅ Corpus {self.corpus_rag.name} removido com sucesso!")
+                self.corpus_rag = None
             else:
                 print("🤷 Não há recursos para remover.")
                 
@@ -482,10 +387,12 @@ def obter_configuracao_padrao() -> dict:
     return {
         # 🚨 IMPORTANTE: Você PRECISA alterar estes valores!
         'PROJECT_ID': "seu-projeto-aqui",  # Coloque o ID do seu projeto Google Cloud
+        'BUCKET_NAME': "seu-bucket-aqui",  # Nome do seu bucket no Google Cloud Storage
         'CAMINHO_CODIGO': "./meu_codigo",  # Onde está seu código
         
         # Configurações do Google Cloud (pode deixar assim)
         'LOCATION': "us-central1",
+        'PASTA_GCS': "codigo-para-analise",
         
         # Configurações de processamento
         'TAMANHO_MAX_MB': 10,  # Arquivos maiores que isso serão ignorados (0 = sem limite)
@@ -564,10 +471,11 @@ def main():
     config = obter_configuracao_padrao()
     
     # Verificar se o usuário configurou tudo
-    if config['PROJECT_ID'] == "seu-projeto-aqui":
+    if config['PROJECT_ID'] == "seu-projeto-aqui" or config['BUCKET_NAME'] == "seu-bucket-aqui":
         print("\n🚨 Opa! Você precisa configurar algumas coisas primeiro:")
         print("\n📝 Edite estas variáveis no código:")
         print(f"   • PROJECT_ID: '{config['PROJECT_ID']}'")
+        print(f"   • BUCKET_NAME: '{config['BUCKET_NAME']}'")
         print(f"   • CAMINHO_CODIGO: '{config['CAMINHO_CODIGO']}'")
         print("\n💡 Depois é só rodar de novo!")
         return
@@ -577,26 +485,30 @@ def main():
         print("\n🔧 Inicializando seu assistente...")
         assistente = AssistenteRAG(config)
         
-        # Verificar se conseguimos acessar o diretório
-        if not assistente.verificar_diretorio():
-            print("\n❌ Não consegui acessar o diretório do código. Verifique as configurações!")
+        # Verificar se conseguimos acessar o bucket
+        if not assistente.verificar_bucket():
+            print("\n❌ Não consegui acessar seu bucket. Verifique as configurações!")
             return
         
-        # Processar arquivos localmente
-        print("\n📁 Processando seus arquivos localmente...")
-        processados, ignorados = assistente.processar_arquivos_localmente()
+        # Enviar arquivos
+        print("\n📤 Enviando seus arquivos para a nuvem...")
+        enviados, ignorados = assistente.enviar_arquivos()
         
-        if processados == 0:
-            print("\n❌ Nenhum arquivo foi processado. Verifique o caminho e os tipos de arquivo!")
+        if enviados == 0:
+            print("\n❌ Nenhum arquivo foi enviado. Verifique o caminho e os tipos de arquivo!")
             return
         
-        # Criar o cérebro da IA (vector store)
+        # Criar o cérebro da IA
         print("\n🧠 Criando a inteligência artificial...")
-        assistente.criar_vectorstore()
+        assistente.criar_corpus_rag()
         
-        # Criar sistema de busca
-        print("\n🔧 Preparando sistema de busca...")
-        assistente.criar_retriever()
+        # Ensinar a IA sobre o código
+        print("\n📚 Ensinando a IA sobre seu código...")
+        assistente.processar_arquivos()
+        
+        # Criar ferramenta de busca
+        print("\n🔧 Preparando ferramentas de busca...")
+        assistente.criar_ferramenta_busca()
         
         # Fazer uma pergunta de exemplo
         print("\n❓ Vou fazer uma pergunta de exemplo...")
@@ -606,9 +518,9 @@ def main():
         print(f"\n🤔 Pergunta: {pergunta_exemplo}")
         print(f"🤖 Resposta: {resposta}")
         
-        # Mostrar informações do sistema
-        info_sistema = assistente.gerar_info_sistema()
-        print(f"\n{info_sistema}")
+        # Mostrar link do Studio
+        link_studio = assistente.gerar_link_studio()
+        print(f"\n🌐 Quer testar no navegador? Acesse: {link_studio}")
         
         # Modo conversa
         while True:
